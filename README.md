@@ -13,7 +13,7 @@ This is a hack project. It updates Azure NSGs to expose pods that are running wi
 ## Configuration
 
 * --kubeconfig: path to a kubeconfig for cluster api access
-* --azure: path to an azure cloud provider JSON config file
+* --azureconfig: path to an azure cloud provider JSON config file
 
 ## TODO
 
