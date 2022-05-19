@@ -28,7 +28,6 @@ import (
 
 type HostNetworkNsgController struct {
 	informerFactory informers.SharedInformerFactory
-	// podInformer     v1informers.PodInformer
 	clientset              *kubernetes.Clientset
 	azConfig               *provider.Config
 	azCreds                azcore.TokenCredential
@@ -141,6 +140,10 @@ func (c *HostNetworkNsgController) UpdateNSG() {
 	// add calculated hostNetwork rules
 	var priority int32 = 2000
 	for _, pod := range pods.Items {
+		if !usesHostNetwork(&pod) {
+			// a pod used our label but doesn't actually use hostNetwork: true
+			continue
+		}
 		nodeIp, ports := c.getNodeIpAndPorts(&pod)
 		if nodeIp == "" {
 			fmt.Printf("skipping pod %s/%s, no nodeIP\n", pod.Namespace, pod.Name)
