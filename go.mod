@@ -7,6 +7,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.0.0
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork v1.0.0
 	k8s.io/api v0.24.0
+	k8s.io/apimachinery v0.24.0
 	k8s.io/client-go v0.24.0
 	sigs.k8s.io/cloud-provider-azure v1.24.0
 )
@@ -72,7 +73,6 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
-	k8s.io/apimachinery v0.24.0 // indirect
 	k8s.io/apiserver v0.24.0 // indirect
 	k8s.io/cloud-provider v0.24.0 // indirect
 	k8s.io/component-base v0.24.0 // indirect

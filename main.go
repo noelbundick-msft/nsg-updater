@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -28,12 +29,12 @@ import (
 type HostNetworkNsgController struct {
 	informerFactory informers.SharedInformerFactory
 	// podInformer     v1informers.PodInformer
-	clientset   *kubernetes.Clientset
-	azConfig    *provider.Config
-	azCreds     azcore.TokenCredential
-	limitTimer *time.Timer
-	needsUpdate *int32
-	updateChan chan struct{}
+	clientset              *kubernetes.Clientset
+	azConfig               *provider.Config
+	azCreds                azcore.TokenCredential
+	limitTimer             *time.Timer
+	needsUpdate            *int32
+	updateChan             chan struct{}
 	limitTimerAllowsUpdate *int32
 }
 
@@ -47,19 +48,19 @@ func NewHostNetworkNsgController(k8sConfig *rest.Config, azConfig *provider.Conf
 	podInformer := informerFactory.Core().V1().Pods()
 
 	c := &HostNetworkNsgController{
-		informerFactory: informerFactory,
-		clientset:   clientset,
-		azConfig:    azConfig,
-		azCreds:     azCreds,
-		limitTimer: time.NewTimer(time.Second * 10),
+		informerFactory:        informerFactory,
+		clientset:              clientset,
+		azConfig:               azConfig,
+		azCreds:                azCreds,
+		limitTimer:             time.NewTimer(time.Second * 10),
 		limitTimerAllowsUpdate: new(int32),
-		needsUpdate: new(int32),
-		updateChan: make(chan struct{}),
+		needsUpdate:            new(int32),
+		updateChan:             make(chan struct{}),
 	}
 
 	podInformer.Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
-			AddFunc: c.podAdd,
+			AddFunc:    c.podAdd,
 			UpdateFunc: c.podUpdate,
 			DeleteFunc: c.podDelete,
 		},
@@ -68,12 +69,12 @@ func NewHostNetworkNsgController(k8sConfig *rest.Config, azConfig *provider.Conf
 	go func() {
 		for {
 			select {
-				case <-c.limitTimer.C:
-					fmt.Println("Timer cleared for takeoff")
-					atomic.StoreInt32(c.limitTimerAllowsUpdate, 1)
-				case <-c.updateChan:
-					fmt.Println("Update signaled!")
-					atomic.StoreInt32(c.needsUpdate, 1)
+			case <-c.limitTimer.C:
+				fmt.Println("Timer cleared for takeoff")
+				atomic.StoreInt32(c.limitTimerAllowsUpdate, 1)
+			case <-c.updateChan:
+				fmt.Println("Update signaled!")
+				atomic.StoreInt32(c.needsUpdate, 1)
 			}
 
 			// if time has elapsed and there's a pending update - do it
@@ -94,6 +95,33 @@ func (c *HostNetworkNsgController) FlagForUpdate() {
 func (c *HostNetworkNsgController) UpdateNSG() {
 	fmt.Println("NSG needs an update!")
 
+	// block updates while we run
+	atomic.StoreInt32(c.limitTimerAllowsUpdate, 0)
+
+	nsgId := c.getNsgId()
+	fmt.Printf("NSG ID: %s\n", nsgId)
+
+	nsgClient, err := armnetwork.NewSecurityGroupsClient(c.azConfig.SubscriptionID, c.azCreds, nil)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	re := regexp.MustCompile(`^/subscriptions/(?P<subscriptionId>.*)/resourceGroups/(?P<resourceGroup>.*)/providers/Microsoft.Network/networkSecurityGroups/(?P<name>.*)$`)
+	match := re.FindStringSubmatch(nsgId)
+	result := make(map[string]string)
+	for i, name := range re.SubexpNames() {
+		if i != 0 && name != "" {
+			result[name] = match[i]
+		}
+	}
+
+	nsg, err := nsgClient.Get(context.TODO(), result["resourceGroup"], result["name"], nil)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	fmt.Printf("existing nsg: %v\n", nsg)
+
 	pods, err := c.clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{LabelSelector: "updateNSG=true"})
 	if err != nil {
 		panic(err.Error())
@@ -101,25 +129,59 @@ func (c *HostNetworkNsgController) UpdateNSG() {
 	// we have point-in-time pod info, so we don't have any new data that needs an update yet
 	atomic.StoreInt32(c.needsUpdate, 0)
 
-	//TODO: enumerate over all pods, build up desired rules
-	for _, pod := range pods.Items {
-		nodeIp, ports := c.getNodeIpAndPorts(&pod)
-		fmt.Printf("Updating NSG for pod %s/%s - %s:%v\n", pod.Namespace, pod.Name, nodeIp, ports)
+	var rules []*armnetwork.SecurityRule
+	
+	// keep existing rules that don't start with hostNetwork-
+	for _, rule := range nsg.Properties.SecurityRules {
+		if !strings.HasPrefix(*rule.Name, "hostNetwork-") {
+			rules = append(rules, rule)
+		}
 	}
 
-	nsgId := c.getNsgId()
-	fmt.Printf("NSG ID: %s\n", nsgId)
+	// add calculated hostNetwork rules
+	var priority int32 = 2000
+	for _, pod := range pods.Items {
+		nodeIp, ports := c.getNodeIpAndPorts(&pod)
+		fmt.Printf("Adding rule for pod %s/%s - %s:%v\n", pod.Namespace, pod.Name, nodeIp, ports)
 
-	// c.updateNsg(nsgId, nodeIp, ports)
-	// // TODO: evaluate nodes & see what needs NSG updates added or removed
+		var portRanges []*string
+		for _, p := range ports {
+			portRanges = append(portRanges, to.Ptr(strconv.Itoa(int(p))))
+		}
+
+		rules = append(rules, &armnetwork.SecurityRule{
+			Name: to.Ptr(fmt.Sprintf("hostNetwork-%s", pod.Name)),
+			Properties: &armnetwork.SecurityRulePropertiesFormat{
+				Access:                   to.Ptr(armnetwork.SecurityRuleAccessAllow),
+				Direction:                to.Ptr(armnetwork.SecurityRuleDirectionInbound),
+				Protocol:                 to.Ptr(armnetwork.SecurityRuleProtocolTCP),
+				Description:              to.Ptr("hostNetwork for pod X"),
+				DestinationAddressPrefix: to.Ptr(nodeIp),
+				DestinationPortRanges:    portRanges,
+				Priority:                 to.Ptr(priority),
+				SourceAddressPrefix:      to.Ptr("*"),
+				SourcePortRange:          to.Ptr("*"),
+			},
+		})
+
+		priority += 10
+	}
+	nsg.SecurityGroup.Properties.SecurityRules = rules
+
+	// PUT nsg with new rules
+	pollerResp, err := nsgClient.BeginCreateOrUpdate(context.TODO(), result["resourceGroup"], result["name"], nsg.SecurityGroup, nil)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	_, err = pollerResp.PollUntilDone(context.TODO(), nil)
+	if err != nil {
+		panic(err.Error())
+	}
+	fmt.Println("Updated NSG")
 
 	// we can now retry NSG operations in N seconds
 	c.limitTimer.Reset(time.Second * 10)
-	atomic.StoreInt32(c.limitTimerAllowsUpdate, 0)
-
-	// // TODO: calculate nsg rules
-	// // TODO: execute NSG update (needs to be batched / buffered / rate-limited)
-
 }
 
 func (c *HostNetworkNsgController) Run(stopCh chan struct{}) {
@@ -128,7 +190,7 @@ func (c *HostNetworkNsgController) Run(stopCh chan struct{}) {
 }
 
 func usesHostNetwork(pod *v1.Pod) bool {
-	return pod.Spec.HostNetwork && pod.Annotations["updateNSG"] == "true" && pod.Spec.NodeName != ""
+	return pod.Spec.HostNetwork && pod.Labels["updateNSG"] == "true" && pod.Spec.NodeName != ""
 }
 
 func (c *HostNetworkNsgController) getNodeIpAndPorts(pod *v1.Pod) (string, []int32) {
@@ -158,51 +220,6 @@ func (c *HostNetworkNsgController) getNsgId() string {
 	return *subnet.Properties.NetworkSecurityGroup.ID
 }
 
-func (c *HostNetworkNsgController) updateNsg(nsgId string, host string, ports []int32) {
-	nsgClient, err := armnetwork.NewSecurityGroupsClient(c.azConfig.SubscriptionID, c.azCreds, nil)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	re := regexp.MustCompile(`^/subscriptions/(?P<subscriptionId>.*)/resourceGroups/(?P<resourceGroup>.*)/providers/Microsoft.Network/networkSecurityGroups/(?P<name>.*)$`)
-	match := re.FindStringSubmatch(nsgId)
-	result := make(map[string]string)
-	for i, name := range re.SubexpNames() {
-		if i != 0 && name != "" {
-			result[name] = match[i]
-		}
-	}
-
-	nsg, err := nsgClient.Get(context.TODO(), result["resourceGroup"], result["name"], nil)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	fmt.Printf("existing nsg: %v\n", nsg)
-
-	// TODO: compare current rules vs new/expected
-	rules := nsg.SecurityGroup.Properties.SecurityRules
-	var priority int32 = 2000
-	for _, p := range ports {
-		rules = append(rules, &armnetwork.SecurityRule{
-			Name: to.Ptr(fmt.Sprintf("hostNetwork-%s-%d", host, p)),
-			Properties: &armnetwork.SecurityRulePropertiesFormat{
-				Access:                   to.Ptr(armnetwork.SecurityRuleAccessAllow),
-				Direction:                to.Ptr(armnetwork.SecurityRuleDirectionInbound),
-				Protocol:                 to.Ptr(armnetwork.SecurityRuleProtocolTCP),
-				Description:              to.Ptr("hostNetwork for pod X"),
-				DestinationAddressPrefix: to.Ptr(host),
-				DestinationPortRange:     to.Ptr(strconv.Itoa(int(p))),
-				Priority:                 to.Ptr(priority),
-				SourceAddressPrefix:      to.Ptr("*"),
-				SourcePortRange:          to.Ptr("*"),
-			},
-		})
-		priority++
-	}
-	// TODO: PUT nsg with new rules
-}
-
 func (c *HostNetworkNsgController) podAdd(obj interface{}) {
 	pod := obj.(*v1.Pod)
 	if usesHostNetwork(pod) {
@@ -212,15 +229,14 @@ func (c *HostNetworkNsgController) podAdd(obj interface{}) {
 }
 
 func (c *HostNetworkNsgController) podUpdate(old, new interface{}) {
-	// NOOP: there are no updateable fields on a Pod that would affect NSG rules
+	oldPod := old.(*v1.Pod)
+	newPod := new.(*v1.Pod)
 
-	// oldPod := old.(*v1.Pod)
-	// newPod := new.(*v1.Pod)
-
-	// if usesHostNetwork(oldPod) || usesHostNetwork(newPod) {
-	// 	fmt.Printf("Updated: %s/%s\n", newPod.Namespace, newPod.Name)
-	// 	c.FlagForUpdate()
-	// }
+	// only run for newly scheduled pods that match our filter
+	if usesHostNetwork(newPod) && (oldPod.Spec.NodeName != newPod.Spec.NodeName) {
+		fmt.Printf("Updated: %s/%s\n", newPod.Namespace, newPod.Name)
+		c.FlagForUpdate()
+	}
 }
 
 func (c *HostNetworkNsgController) podDelete(obj interface{}) {
