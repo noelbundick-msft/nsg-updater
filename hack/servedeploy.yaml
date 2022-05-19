@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app2
+  labels:
+    app: serve
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: app2
+  template:
+    metadata:
+      labels:
+        app: app2
+        updateNSG: "true"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - app2
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+      - image: node:alpine
+        name: app
+        command: ['npx', '-y', 'serve', '-p', '8080']
+        resources:
+          limits:
+            cpu: "250m"
+            memory: "100Mi"
+        ports:
+          - containerPort: 8080
+      hostNetwork: true

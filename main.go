@@ -142,6 +142,10 @@ func (c *HostNetworkNsgController) UpdateNSG() {
 	var priority int32 = 2000
 	for _, pod := range pods.Items {
 		nodeIp, ports := c.getNodeIpAndPorts(&pod)
+		if nodeIp == "" {
+			fmt.Printf("skipping pod %s/%s, no nodeIP\n", pod.Namespace, pod.Name)
+			continue
+		}
 		fmt.Printf("Adding rule for pod %s/%s - %s:%v\n", pod.Namespace, pod.Name, nodeIp, ports)
 
 		var portRanges []*string
@@ -150,7 +154,7 @@ func (c *HostNetworkNsgController) UpdateNSG() {
 		}
 
 		rules = append(rules, &armnetwork.SecurityRule{
-			Name: to.Ptr(fmt.Sprintf("hostNetwork-%s", pod.Name)),
+			Name: to.Ptr(fmt.Sprintf("hostNetwork-%s-%s", pod.Namespace, pod.Name)),
 			Properties: &armnetwork.SecurityRulePropertiesFormat{
 				Access:                   to.Ptr(armnetwork.SecurityRuleAccessAllow),
 				Direction:                to.Ptr(armnetwork.SecurityRuleDirectionInbound),
@@ -187,6 +191,7 @@ func (c *HostNetworkNsgController) UpdateNSG() {
 func (c *HostNetworkNsgController) Run(stopCh chan struct{}) {
 	c.informerFactory.Start(stopCh)
 	c.informerFactory.WaitForCacheSync(stopCh)
+	c.FlagForUpdate()
 }
 
 func usesHostNetwork(pod *v1.Pod) bool {

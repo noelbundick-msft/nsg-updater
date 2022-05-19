@@ -15,4 +15,6 @@ spec:
         memory: "100Mi"
     ports:
       - containerPort: 8080
+      - containerPort: 8081
+      - containerPort: 8082
   hostNetwork: true
