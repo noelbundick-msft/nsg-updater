@@ -10,3 +10,13 @@ This is a hack project. It updates Azure NSGs to expose pods that are running wi
 * Merge with the existing NSG rules
 * Update the NSG in Azure
 
+## Configuration
+
+* --kubeconfig: path to a kubeconfig for cluster api access
+* --azure: path to an azure cloud provider JSON config file
+
+## TODO
+
+* run it from inside an AKS cluster
+  * configure RBAC / ServiceAccount
+  * mount /etc/kubernetes/azure.json and pass to the --azureconfig param
