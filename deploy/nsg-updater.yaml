@@ -1,0 +1,89 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  namespace: default
+  name: nsg-updater
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["pods", "nodes"]
+  verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nsg-updater-app
+subjects:
+- kind: Group
+  name: system:serviceaccounts:default
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: nsg-updater
+  apiGroup: rbac.authorization.k8s.io
+---
+# Give your Service Principal something like Network Contributor on the MC_* resource group
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nsg-updater-sp
+type: Opaque
+data:
+  AZURE_TENANT_ID: <echo -n $AZURE_TENANT_ID | base64>
+  AZURE_CLIENT_ID: <echo -n $AZURE_CLIENT_ID | base64>
+  AZURE_CLIENT_SECRET: <echo -n $AZURE_CLIENT_SECRET | base64>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nsg-updater
+  labels:
+    app: nsg-updater
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nsg-updater
+  template:
+    metadata:
+      labels:
+        app: nsg-updater
+    spec:
+      containers:
+      - image: ghcr.io/noelbundick-msft/nsg-updater:main
+        name: nsg-updater
+        imagePullPolicy: Always
+        command:
+          - "/nsg-updater"
+          - "--kubeconfig="   # clear out the kubeconfig arg so it gets picked up from in-cluster
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "500Mi"
+        env:
+          - name: AZURE_TENANT_ID
+            valueFrom:
+              secretKeyRef:
+                name: nsg-updater-sp
+                key: AZURE_TENANT_ID
+          - name: AZURE_CLIENT_ID
+            valueFrom:
+              secretKeyRef:
+                name: nsg-updater-sp
+                key: AZURE_CLIENT_ID
+          - name: AZURE_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: nsg-updater-sp
+                key: AZURE_CLIENT_SECRET
+          # extra logs for azure-sdk-for-go
+          # - name: AZURE_SDK_GO_LOGGING
+          #   value: all
+        volumeMounts:
+        - name: azureconfig
+          mountPath: /etc/kubernetes/azure.json
+          readOnly: true
+      volumes:
+      - name: azureconfig
+        hostPath:
+          path: /etc/kubernetes/azure.json
+          type: File
