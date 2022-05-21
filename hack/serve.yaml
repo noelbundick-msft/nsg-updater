@@ -1,20 +1,38 @@
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
+  name: serve
   labels:
-    updateNSG: "true"
-  name: app
+    app: serve
 spec:
-  containers:
-  - image: node:alpine
-    name: app
-    command: ['npx', '-y', 'serve', '-p', '8080']
-    resources:
-      limits:
-        cpu: "250m"
-        memory: "100Mi"
-    ports:
-      - containerPort: 8080
-      - containerPort: 8081
-      - containerPort: 8082
-  hostNetwork: true
+  replicas: 2
+  selector:
+    matchLabels:
+      app: serve
+  template:
+    metadata:
+      labels:
+        app: serve
+        updateNSG: "true"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - serve
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+      - image: node:alpine
+        name: serve
+        command: ['npx', '-y', 'serve', '-p', '8080']
+        resources:
+          limits:
+            cpu: "250m"
+            memory: "100Mi"
+        ports:
+          - containerPort: 8080
+      hostNetwork: true
